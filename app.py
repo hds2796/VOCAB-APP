@@ -223,7 +223,7 @@ with tab1:
     st.subheader("사진 또는 PDF로 단어 추가")
     c.execute("SELECT DISTINCT category FROM vocab")
     db_categories = [row[0] for row in c.fetchall() if row[0]]
-    base_categories = ["토플 영단어", "경제학 용어", "ETC"]
+    base_categories = ["토플 영단어"]
     for cat in db_categories:
         if cat not in base_categories: base_categories.append(cat)
     base_categories.append("직접 입력")
