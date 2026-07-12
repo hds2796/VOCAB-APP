@@ -50,6 +50,12 @@ if not check_password():
 def handle_oauth_callback():
     # URL에 인증 코드가 반환된 경우 처리
     if 'code' in st.query_params:
+        if 'oauth_code_verifier' not in st.session_state:
+            # 과거의 만료된 코드가 URL에 남아있는 경우 초기화
+            st.query_params.clear()
+            st.warning("이전 로그인 시도 기록이 만료되었습니다. 화면 하단의 '구글 계정으로 로그인' 버튼을 새로 클릭하여 주십시오.")
+            return
+
         try:
             client_config = json.loads(st.secrets["GOOGLE_CLIENT_CONFIG"])
             flow = Flow.from_client_config(
@@ -58,9 +64,8 @@ def handle_oauth_callback():
                 redirect_uri=st.secrets["REDIRECT_URI"]
             )
             
-            # (추가) 스트림릿 세션에 저장해둔 PKCE 코드 검증기(code_verifier) 복원
-            if 'oauth_code_verifier' in st.session_state:
-                flow.code_verifier = st.session_state['oauth_code_verifier']
+            # 스트림릿 세션에 저장해둔 PKCE 코드 검증기(code_verifier) 복원
+            flow.code_verifier = st.session_state['oauth_code_verifier']
                 
             flow.fetch_token(code=st.query_params['code'])
             creds = flow.credentials
@@ -470,9 +475,8 @@ with tab5:
             )
             auth_url, _ = flow.authorization_url(prompt='consent', access_type='offline')
             
-            # (추가) Missing code verifier 에러 방지를 위해 코드 검증기를 세션에 보관
-            if hasattr(flow, 'code_verifier'):
-                st.session_state['oauth_code_verifier'] = flow.code_verifier
+            # Missing code verifier 에러 방지를 위해 코드 검증기를 세션에 명시적 보관
+            st.session_state['oauth_code_verifier'] = flow.code_verifier
                 
             st.markdown(f"### [👉 구글 계정으로 로그인하여 드라이브 연동하기]({auth_url})")
         except Exception as e:
