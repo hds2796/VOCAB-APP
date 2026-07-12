@@ -18,8 +18,8 @@ from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
 
-# 구글 드라이브 파일 접근 권한 범위
-SCOPES = ['https://www.googleapis.com/auth/drive.file']
+# 구글 드라이브 파일 접근 권한 범위 (수정됨: 전체 드라이브 접근 권한으로 변경)
+SCOPES = ['https://www.googleapis.com/auth/drive']
 
 # --- [보안: 로그인 시스템] ---
 def check_password():
