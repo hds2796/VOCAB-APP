@@ -18,8 +18,33 @@ from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
 
-# 구글 드라이브 파일 접근 권한 범위 (수정됨: 전체 드라이브 접근 권한으로 변경)
+# 구글 드라이브 파일 접근 권한 범위
 SCOPES = ['https://www.googleapis.com/auth/drive']
+
+# =======================================================
+# 1. 데이터베이스 설정 (세션 초기화 방지를 위해 최상단 배치)
+# =======================================================
+conn = sqlite3.connect('my_vocab.db', check_same_thread=False)
+c = conn.cursor()
+
+# 단어장 테이블
+c.execute('''CREATE TABLE IF NOT EXISTS vocab 
+             (category TEXT, word TEXT, meaning TEXT, example TEXT, date TEXT, wrong_count INTEGER DEFAULT 0, last_tested TEXT)''')
+
+# 구글 로그인 인증용 임시 저장 테이블 및 권한 토큰 영구 저장 테이블 신설
+c.execute('''CREATE TABLE IF NOT EXISTS oauth_store (state TEXT, verifier TEXT)''')
+c.execute('''CREATE TABLE IF NOT EXISTS oauth_creds (creds TEXT)''')
+conn.commit()
+
+try:
+    c.execute("ALTER TABLE vocab ADD COLUMN wrong_count INTEGER DEFAULT 0")
+    conn.commit()
+except sqlite3.OperationalError: pass
+try:
+    c.execute("ALTER TABLE vocab ADD COLUMN last_tested TEXT")
+    conn.commit()
+except sqlite3.OperationalError: pass
+
 
 # --- [보안: 로그인 시스템] ---
 def check_password():
@@ -46,16 +71,25 @@ def check_password():
 if not check_password():
     st.stop()
 
+
 # --- [구글 드라이브 OAuth 인증 콜백 처리] ---
 def handle_oauth_callback():
-    # URL에 인증 코드가 반환된 경우 처리
-    if 'code' in st.query_params:
-        if 'oauth_code_verifier' not in st.session_state:
-            # 과거의 만료된 코드가 URL에 남아있는 경우 초기화
+    # URL에 state와 code가 모두 반환된 경우 처리
+    if 'code' in st.query_params and 'state' in st.query_params:
+        state = st.query_params['state']
+        code = st.query_params['code']
+        
+        # DB에서 일치하는 state의 verifier를 탐색 (세션 초기화 우회)
+        c.execute("SELECT verifier FROM oauth_store WHERE state=?", (state,))
+        row = c.fetchone()
+        
+        if not row:
             st.query_params.clear()
-            st.warning("이전 로그인 시도 기록이 만료되었습니다. 화면 하단의 '구글 계정으로 로그인' 버튼을 새로 클릭하여 주십시오.")
+            st.warning("로그인 세션이 만료되었습니다. 데이터 백업 탭에서 버튼을 다시 클릭하여 주십시오.")
             return
 
+        verifier = row[0]
+        
         try:
             client_config = json.loads(st.secrets["GOOGLE_CLIENT_CONFIG"])
             flow = Flow.from_client_config(
@@ -64,14 +98,13 @@ def handle_oauth_callback():
                 redirect_uri=st.secrets["REDIRECT_URI"]
             )
             
-            # 스트림릿 세션에 저장해둔 PKCE 코드 검증기(code_verifier) 복원
-            flow.code_verifier = st.session_state['oauth_code_verifier']
-                
-            flow.fetch_token(code=st.query_params['code'])
+            # DB에서 꺼내온 검증키 주입
+            flow.code_verifier = verifier
+            flow.fetch_token(code=code)
             creds = flow.credentials
             
-            # 인증 토큰 세션 저장
-            st.session_state['drive_creds'] = {
+            # 인증 토큰을 DB에 영구 저장 (앱 재부팅 시에도 로그인 유지)
+            cred_dict = {
                 'token': creds.token,
                 'refresh_token': creds.refresh_token,
                 'token_uri': creds.token_uri,
@@ -79,7 +112,12 @@ def handle_oauth_callback():
                 'client_secret': creds.client_secret,
                 'scopes': creds.scopes
             }
-            # URL의 쿼리 파라미터 초기화
+            
+            c.execute("DELETE FROM oauth_creds")
+            c.execute("INSERT INTO oauth_creds VALUES (?)", (json.dumps(cred_dict),))
+            c.execute("DELETE FROM oauth_store") # 사용 끝난 임시 검증키 삭제
+            conn.commit()
+            
             st.query_params.clear()
             st.rerun()
         except Exception as e:
@@ -87,11 +125,20 @@ def handle_oauth_callback():
 
 handle_oauth_callback()
 
+
 def init_drive_service():
-    if 'drive_creds' in st.session_state:
-        creds = Credentials.from_authorized_user_info(st.session_state['drive_creds'], SCOPES)
-        return build('drive', 'v3', credentials=creds)
+    # DB에 저장된 권한 토큰을 불러와 드라이브 서비스 활성화
+    c.execute("SELECT creds FROM oauth_creds")
+    row = c.fetchone()
+    if row:
+        try:
+            cred_dict = json.loads(row[0])
+            creds = Credentials.from_authorized_user_info(cred_dict, SCOPES)
+            return build('drive', 'v3', credentials=creds)
+        except Exception as e:
+            pass
     return None
+
 
 def upload_to_google_drive(csv_string):
     service = init_drive_service()
@@ -108,6 +155,7 @@ def upload_to_google_drive(csv_string):
     media = MediaIoBaseUpload(io.BytesIO(csv_bytes), mimetype='text/csv', resumable=True)
     file = service.files().create(body=file_metadata, media_body=media, fields='id').execute()
     return file.get('id')
+
 
 def download_latest_from_google_drive():
     service = init_drive_service()
@@ -134,21 +182,6 @@ def download_latest_from_google_drive():
     content = service.files().get_media(fileId=file_id).execute()
     return content, file_name
 
-# 1. 데이터베이스 설정
-conn = sqlite3.connect('my_vocab.db', check_same_thread=False)
-c = conn.cursor()
-c.execute('''CREATE TABLE IF NOT EXISTS vocab 
-             (category TEXT, word TEXT, meaning TEXT, example TEXT, date TEXT, wrong_count INTEGER DEFAULT 0, last_tested TEXT)''')
-conn.commit()
-
-try:
-    c.execute("ALTER TABLE vocab ADD COLUMN wrong_count INTEGER DEFAULT 0")
-    conn.commit()
-except sqlite3.OperationalError: pass
-try:
-    c.execute("ALTER TABLE vocab ADD COLUMN last_tested TEXT")
-    conn.commit()
-except sqlite3.OperationalError: pass
 
 # 세션 상태 초기화
 if 'extracted_df' not in st.session_state: st.session_state.extracted_df = None
@@ -161,6 +194,7 @@ if 'options_pairs' not in st.session_state: st.session_state.options_pairs = Non
 if 'last_result' not in st.session_state: st.session_state.last_result = None
 if 'score' not in st.session_state: st.session_state.score = 0
 if 'wrong_answers' not in st.session_state: st.session_state.wrong_answers = []
+
 
 # 2. 웹사이트 화면 구성
 st.set_page_config(page_title="단어장 앱", page_icon="📝")
@@ -221,7 +255,6 @@ with tab1:
                         response = client.models.generate_content(model='gemini-2.5-flash', contents=contents)
                         result_text = response.text.strip()
                         
-                        # UI 파싱 오류 방지를 위한 문자열 조합
                         prefix_json = "`" * 3 + "json"
                         prefix_empty = "`" * 3
                         
@@ -458,13 +491,18 @@ with tab4:
         if cat_dist: st.bar_chart(pd.DataFrame(cat_dist, columns=["카테고리", "단어 수"]).set_index("카테고리"))
         else: st.info("데이터가 없습니다.")
 
+
 # --- [탭 5: 데이터 백업/복구 (구글 드라이브 양방향 연동)] ---
 with tab5:
     st.subheader("데이터 백업 및 복구 관리")
     st.write("무료 클라우드 서버 특성상 서버가 재부팅되면 저장된 단어가 초기화될 수 있습니다. 공부를 마친 후 수시로 데이터를 백업해 두십시오.")
     
-    # 드라이브 로그인이 안 되어 있는 경우 버튼 표시
-    if 'drive_creds' not in st.session_state:
+    # DB 조회하여 드라이브 로그인 권한이 있는지 확인
+    c.execute("SELECT COUNT(*) FROM oauth_creds")
+    is_authenticated = c.fetchone()[0] > 0
+    
+    # 로그인 정보가 DB에 없는 경우
+    if not is_authenticated:
         st.warning("클라우드 자동 저장 및 복구 기능을 사용하려면 권한 인증이 필요합니다.")
         try:
             client_config = json.loads(st.secrets["GOOGLE_CLIENT_CONFIG"])
@@ -473,19 +511,28 @@ with tab5:
                 scopes=SCOPES,
                 redirect_uri=st.secrets["REDIRECT_URI"]
             )
-            auth_url, _ = flow.authorization_url(prompt='consent', access_type='offline')
+            auth_url, state = flow.authorization_url(prompt='consent', access_type='offline')
             
-            # Missing code verifier 에러 방지를 위해 코드 검증기를 세션에 명시적 보관
-            st.session_state['oauth_code_verifier'] = flow.code_verifier
+            # DB에 임시 검증키 및 state 저장
+            c.execute("DELETE FROM oauth_store")
+            c.execute("INSERT INTO oauth_store (state, verifier) VALUES (?, ?)", (state, flow.code_verifier))
+            conn.commit()
                 
             st.markdown(f"### [👉 구글 계정으로 로그인하여 드라이브 연동하기]({auth_url})")
         except Exception as e:
             st.error(f"Secrets 설정에 문제가 있습니다. 설정 확인 요망: {e}")
     
-    # 드라이브 로그인이 완료된 경우 기능 활성화
+    # 로그인 정보가 DB에 있는 경우 (기능 활성화)
     else:
-        st.success("✅ 구글 드라이브 인증이 완료되었습니다.")
-        
+        col_auth1, col_auth2 = st.columns([3, 1])
+        with col_auth1:
+            st.success("✅ 구글 드라이브 인증이 완료되었습니다.")
+        with col_auth2:
+            if st.button("🔌 연동 해제", use_container_width=True):
+                c.execute("DELETE FROM oauth_creds")
+                conn.commit()
+                st.rerun()
+                
         c.execute("SELECT category, word, meaning, example, date, wrong_count, last_tested FROM vocab")
         all_rows = c.fetchall()
         
