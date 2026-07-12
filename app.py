@@ -10,17 +10,13 @@ from PIL import Image
 # --- [보안: 로그인 시스템] ---
 def check_password():
     """Returns `True` if the user had a correct password."""
-    
-    # 1. URL 주소에 비밀번호가 포함되어 있는지 확인 (자동 로그인 통과)
     if "pwd" in st.query_params:
         if st.query_params["pwd"] == st.secrets["APP_PASSWORD"]:
             st.session_state["password_correct"] = True
 
-    # 2. 이미 로그인된 상태인지 확인
     if st.session_state.get("password_correct", False):
         return True
 
-    # 3. 위 두 조건에 해당하지 않으면 일반 로그인 화면 출력
     st.title("🔒 나만의 단어장 로그인")
     st.warning("⚠️ **경고: 처음에 설정한 비밀번호를 잃어버리면 절대 찾을 수 없습니다. 꼭 기억해 주세요!**")
     
@@ -67,6 +63,10 @@ if 'options_pairs' not in st.session_state:
     st.session_state.options_pairs = None
 if 'last_result' not in st.session_state:
     st.session_state.last_result = None
+if 'score' not in st.session_state:
+    st.session_state.score = 0
+if 'wrong_answers' not in st.session_state:
+    st.session_state.wrong_answers = []
 
 # 2. 웹사이트 화면 구성
 st.set_page_config(page_title="단어장 앱", page_icon="📝")
@@ -82,12 +82,12 @@ API_KEY = st.secrets["GEMINI_API_KEY"]
 
 # --- [탭 1: 단어장 생성] ---
 with tab1:
-    st.subheader("사진으로 단어 추가")
+    st.subheader("사진 또는 PDF로 단어 추가")
     
     c.execute("SELECT DISTINCT category FROM vocab")
     db_categories = [row[0] for row in c.fetchall() if row[0]]
     
-    base_categories = ["토플 영단어", "ETC"]
+    base_categories = ["토플 영단어", "경제학 용어", "ETC"]
     for cat in db_categories:
         if cat not in base_categories:
             base_categories.append(cat)
@@ -98,30 +98,40 @@ with tab1:
     if category == "직접 입력":
         category = st.text_input("새 카테고리 이름 입력")
 
-    uploaded_file = st.file_uploader("단어가 있는 사진 업로드", type=["jpg", "png", "jpeg"])
+    uploaded_files = st.file_uploader("단어가 있는 사진 또는 PDF 파일 업로드 (복수 선택 가능)", 
+                                      type=["jpg", "png", "jpeg", "pdf"], 
+                                      accept_multiple_files=True)
     
-    if uploaded_file is not None:
-        image = Image.open(uploaded_file)
-        st.image(image, caption="업로드된 사진", use_container_width=True)
+    if uploaded_files:
+        st.write(f"📎 총 {len(uploaded_files)}개의 파일이 선택되었습니다.")
         
         if st.button("AI 분석 실행"):
             if not API_KEY:
                 st.error("API 키 오류")
             else:
-                with st.spinner('분석 중...'):
+                with st.spinner('모든 파일을 통합 분석 중입니다...'):
                     try:
+                        from google.genai import types
                         client = genai.Client(api_key=API_KEY)
+                        
+                        contents = []
+                        for f in uploaded_files:
+                            file_bytes = f.read()
+                            contents.append(types.Part.from_bytes(data=file_bytes, mime_type=f.type))
+                        
                         prompt = """
-                        이미지에서 중요한 영어 단어들을 추출해주세요. 
-                        단어장의 사진이 올라온 경우, 단어장에서 외우라고 하는 단어 모두를 추출합니다. 
+                        업로드된 이미지 또는 PDF 문서들에서 중요한 영어 단어들을 모두 추출해주세요. 
+                        여러 개의 파일이나 페이지가 제공된 경우, 누락 없이 모든 파일의 단어를 하나로 합쳐서 추출해야 합니다.
                         반드시 아래 형태의 JSON 배열로만 답변해야 합니다:
                         [
                           {"word": "단어", "meaning": "한국어 뜻", "example": "영어 예문"}
                         ]
                         """
+                        contents.append(prompt)
+                        
                         response = client.models.generate_content(
                             model='gemini-2.5-flash',
-                            contents=[image, prompt]
+                            contents=contents
                         )
                         
                         result_text = response.text.strip()
@@ -153,9 +163,13 @@ with tab1:
                 st.session_state.extracted_df = None
                 st.rerun()
 
-# --- [탭 2: 누적 단어 확인] ---
+# --- [탭 2: 누적 단어 확인 (플래시카드 뷰 추가)] ---
 with tab2:
     st.subheader("데이터베이스 목록 및 관리")
+    
+    view_mode = st.radio("필터 옵션", ["전체 단어 보기", "틀린 단어(오답)만 카테고리별로 모아보기"], horizontal=True, key="view_mode")
+    view_style = st.radio("표시 방식", ["표(엑셀) 형식으로 수정/관리", "플래시카드 형식으로 예문과 함께 학습"], horizontal=True, key="view_style")
+    st.divider()
     
     c.execute("SELECT DISTINCT category FROM vocab")
     categories = [row[0] for row in c.fetchall() if row[0]]
@@ -172,48 +186,70 @@ with tab2:
                 st.rerun()
             st.divider()
         
-        if selected_category == "전체":
-            c.execute("SELECT rowid, category, word, meaning, example, wrong_count FROM vocab")
-        else:
-            c.execute("SELECT rowid, category, word, meaning, example, wrong_count FROM vocab WHERE category=?", (selected_category,))
+        query = "SELECT rowid, category, word, meaning, example, wrong_count FROM vocab"
+        conditions = []
+        params = []
+        
+        if selected_category != "전체":
+            conditions.append("category = ?")
+            params.append(selected_category)
             
+        if view_mode == "틀린 단어(오답)만 카테고리별로 모아보기":
+            conditions.append("wrong_count > 0")
+            
+        if conditions:
+            query += " WHERE " + " AND ".join(conditions)
+            
+        query += " ORDER BY category ASC, word ASC"
+        
+        c.execute(query, tuple(params))
         words = c.fetchall()
         
         if words:
-            df_existing = pd.DataFrame(words, columns=["ID", "카테고리", "단어", "뜻", "예문", "틀린 횟수"])
-            
-            st.write("✏️ **데이터 수정 (셀 더블클릭 후 수정 가능)**")
-            edited_existing_df = st.data_editor(df_existing, disabled=["ID", "틀린 횟수"], use_container_width=True)
-            
-            if st.button("변경사항 갱신"):
-                for index, row in edited_existing_df.iterrows():
-                    c.execute("UPDATE vocab SET category=?, word=?, meaning=?, example=? WHERE rowid=?",
-                              (row["카테고리"], row["단어"], row["뜻"], row["예문"], row["ID"]))
-                conn.commit()
-                st.success("데이터베이스 갱신 완료")
-                st.rerun()
+            # 표 형식 (수정 가능)
+            if view_style == "표(엑셀) 형식으로 수정/관리":
+                df_existing = pd.DataFrame(words, columns=["ID", "카테고리", "단어", "뜻", "예문", "틀린 횟수"])
+                st.write("✏️ **데이터 수정 (셀 더블클릭 후 수정 가능)**")
+                edited_existing_df = st.data_editor(df_existing, disabled=["ID", "틀린 횟수"], use_container_width=True)
                 
-            st.divider()
-            st.markdown("### 🗑️ 개별 단어 선택 삭제")
-            delete_options = {f"[{row[0]}] {row[2]} : {row[3]}": row[0] for row in words}
-            selected_words_to_delete = st.multiselect("삭제할 단어를 선택하십시오. (복수 선택 가능)", options=list(delete_options.keys()))
-            
-            if st.button("❌ 선택한 단어 삭제", key="del_words_btn"):
-                if selected_words_to_delete:
-                    for item in selected_words_to_delete:
-                        word_id = delete_options[item]
-                        c.execute("DELETE FROM vocab WHERE rowid=?", (word_id,))
+                if st.button("변경사항 갱신"):
+                    for index, row in edited_existing_df.iterrows():
+                        c.execute("UPDATE vocab SET category=?, word=?, meaning=?, example=? WHERE rowid=?",
+                                  (row["카테고리"], row["단어"], row["뜻"], row["예문"], row["ID"]))
                     conn.commit()
-                    st.success(f"선택한 {len(selected_words_to_delete)}개의 단어가 삭제되었습니다.")
+                    st.success("데이터베이스 갱신 완료")
                     st.rerun()
-                else:
-                    st.warning("삭제할 단어를 먼저 선택해 주십시오.")
+                    
+                st.divider()
+                st.markdown("### 🗑️ 개별 단어 선택 삭제")
+                delete_options = {f"[{row[0]}] {row[2]} : {row[3]}": row[0] for row in words}
+                selected_words_to_delete = st.multiselect("삭제할 단어를 선택하십시오. (복수 선택 가능)", options=list(delete_options.keys()))
+                
+                if st.button("❌ 선택한 단어 삭제", key="del_words_btn"):
+                    if selected_words_to_delete:
+                        for item in selected_words_to_delete:
+                            word_id = delete_options[item]
+                            c.execute("DELETE FROM vocab WHERE rowid=?", (word_id,))
+                        conn.commit()
+                        st.success(f"선택한 {len(selected_words_to_delete)}개의 단어가 삭제되었습니다.")
+                        st.rerun()
+                    else:
+                        st.warning("삭제할 단어를 먼저 선택해 주십시오.")
+                        
+            # 플래시카드 형식 (예문 보기)
+            else:
+                st.write("💡 **단어 상자를 클릭하면 뜻과 예문이 펼쳐집니다.**")
+                for w in words:
+                    with st.expander(f"📖 **{w[2]}** (틀린 횟수: {w[5]})"):
+                        st.markdown(f"**뜻:** {w[3]}")
+                        st.markdown(f"**예문:** {w[4]}")
+                        st.caption(f"카테고리: {w[1]}")
         else:
-            st.info("데이터가 없습니다.")
+            st.info("조건에 맞는 데이터가 없습니다.")
     else:
         st.info("데이터가 없습니다.")
 
-# --- [탭 3: 실전 퀴즈 (중복 출제 오류 수정)] ---
+# --- [탭 3: 실전 퀴즈 (정답 확인 시 예문 노출)] ---
 with tab3:
     st.subheader("퀴즈 설정 및 실행")
     
@@ -225,16 +261,26 @@ with tab3:
             quiz_cat = st.selectbox("시험 범위 선택", ["전체"] + quiz_categories, key="quiz_cat")
             quiz_type = st.radio("문제 유형", ["객관식", "주관식"], horizontal=True)
             quiz_direction = st.radio("출제 방식", ["영단어를 보고 뜻 맞추기", "뜻을 보고 영단어 맞추기"], horizontal=True)
-            min_wrong = st.number_input("최소 틀린 횟수 기준", min_value=0, value=0, step=1)
+            quiz_mode = st.radio("출제 대상", ["모든 단어 대상", "틀린 단어(오답)만 모아서 시험보기"], horizontal=True)
             
-            if quiz_cat == "전체":
-                c.execute("SELECT rowid, word, meaning, wrong_count FROM vocab WHERE wrong_count >= ?", (min_wrong,))
-            else:
-                c.execute("SELECT rowid, word, meaning, wrong_count FROM vocab WHERE category=? AND wrong_count >= ?", (quiz_cat, min_wrong))
+            # 예문(example) 열까지 모두 불러오도록 쿼리 수정
+            query = "SELECT rowid, word, meaning, example, wrong_count FROM vocab"
+            conditions = []
+            params = []
             
+            if quiz_cat != "전체":
+                conditions.append("category = ?")
+                params.append(quiz_cat)
+                
+            if quiz_mode == "틀린 단어(오답)만 모아서 시험보기":
+                conditions.append("wrong_count > 0")
+                
+            if conditions:
+                query += " WHERE " + " AND ".join(conditions)
+                
+            c.execute(query, tuple(params))
             raw_all_words = c.fetchall()
             
-            # 단어(word) 기준으로 중복 제거 로직 추가
             unique_all_words = []
             seen_words = set()
             for row in raw_all_words:
@@ -262,6 +308,8 @@ with tab3:
                         st.session_state.options_pairs = None
                         st.session_state.q_type = quiz_type
                         st.session_state.q_dir = quiz_direction
+                        st.session_state.score = 0
+                        st.session_state.wrong_answers = []
                         st.rerun()
             else:
                 st.warning("조건에 맞는 단어가 없습니다.")
@@ -274,7 +322,8 @@ with tab3:
             st.write(f"### 문제 {st.session_state.current_idx + 1} / {len(st.session_state.quiz_pool)}")
             
             current_q = st.session_state.quiz_pool[st.session_state.current_idx]
-            q_id, raw_word, raw_meaning, q_wrong_count = current_q
+            # example 데이터 언패킹 추가
+            q_id, raw_word, raw_meaning, raw_example, q_wrong_count = current_q
             
             c.execute("SELECT word, meaning FROM vocab")
             global_pool = c.fetchall()
@@ -317,10 +366,16 @@ with tab3:
                         
                     if is_correct:
                         st.session_state.last_result = "correct"
+                        st.session_state.score += 1
                     else:
                         st.session_state.last_result = "incorrect"
                         c.execute("UPDATE vocab SET wrong_count = wrong_count + 1 WHERE rowid = ?", (q_id,))
                         conn.commit()
+                        st.session_state.wrong_answers.append({
+                            "문제": q_text,
+                            "정답": q_ans,
+                            "내가 고른 답": user_answer
+                        })
                         
                     st.rerun()
             else:
@@ -328,6 +383,10 @@ with tab3:
                     st.success("정답입니다.")
                 else:
                     st.error(f"오답입니다. 정답: {q_ans}")
+                
+                # 정답 확인 후 예문 노출 패널 추가
+                with st.expander("📖 예문 확인하기"):
+                    st.write(raw_example if raw_example else "등록된 예문이 없습니다.")
                 
                 if st.session_state.q_type == "객관식":
                     st.divider()
@@ -346,7 +405,23 @@ with tab3:
                     st.rerun()
         else:
             st.progress(1.0)
-            st.success("모든 문제 풀이를 완료했습니다.")
+            st.markdown("---")
+            st.subheader("🏁 퀴즈 결과")
+            
+            total_questions = len(st.session_state.quiz_pool)
+            score = st.session_state.score
+            
+            st.write(f"### 🏆 최종 점수: {score} / {total_questions} 점")
+            
+            if score == total_questions:
+                st.balloons()
+                st.success("💯 완벽합니다! 모든 문제를 다 맞추셨습니다!")
+            else:
+                st.warning("📝 **오답 노트**")
+                df_wrong = pd.DataFrame(st.session_state.wrong_answers)
+                st.table(df_wrong)
+                
+            st.markdown("---")
             if st.button("새 퀴즈 설정으로 돌아가기"):
                 st.session_state.quiz_started = False
                 st.rerun()
@@ -404,3 +479,4 @@ with tab4:
                 st.error("업로드된 파일의 형식이 올바르지 않습니다. 필수 열 정보가 누락되었습니다.")
         except Exception as e:
             st.error(f"파일을 파싱하는 중 오류가 발생했습니다: {e}")
+            
