@@ -4,4 +4,4 @@ google-genai
 pandas
 pillow
 google-api-python-client
-google-auth
+google-auth-oauthlib
