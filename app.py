@@ -19,7 +19,6 @@ def check_password():
     password = st.text_input("비밀번호를 입력하세요", type="password")
     
     if st.button("접속하기"):
-        # 비밀 금고(secrets)에 저장된 비밀번호와 비교
         if password == st.secrets["APP_PASSWORD"]:
             st.session_state["password_correct"] = True
             st.rerun()
@@ -28,9 +27,7 @@ def check_password():
     return False
 
 if not check_password():
-    st.stop()  # 로그인을 안 하면 여기서 프로그램 멈춤 (아래 코드 실행 안 됨)
-
-# --- [이하 기존 메인 프로그램] ---
+    st.stop()
 
 # 1. 데이터베이스 설정
 conn = sqlite3.connect('my_vocab.db', check_same_thread=False)
@@ -71,9 +68,8 @@ c.execute("SELECT COUNT(*) FROM vocab")
 total_vocab_count = c.fetchone()[0]
 st.info(f"현재 데이터베이스에 등록된 총 영단어 수: **{total_vocab_count}개**")
 
-tab1, tab2, tab3 = st.tabs(["단어장 생성", "누적 단어 확인", "실전 퀴즈"])
+tab1, tab2, tab3, tab4 = st.tabs(["단어장 생성", "누적 단어 확인", "실전 퀴즈", "데이터 백업/복구"])
 
-# API 키를 코드에 직접 안 쓰고, 비밀 금고에서 꺼내오도록 변경
 API_KEY = st.secrets["GEMINI_API_KEY"]
 
 # --- [탭 1: 단어장 생성] ---
@@ -100,14 +96,13 @@ with tab1:
         image = Image.open(uploaded_file)
         st.image(image, caption="업로드된 사진", use_container_width=True)
         
-        if st.button("단어 추출 실행"):
+        if st.button("AI 분석 실행"):
             if not API_KEY:
                 st.error("API 키 오류")
             else:
-                with st.spinner('추출 중...'):
+                with st.spinner('분석 중...'):
                     try:
                         client = genai.Client(api_key=API_KEY)
-                        # 네가 수정한 완벽한 프롬프트 적용
                         prompt = """
                         이미지에서 중요한 영어 단어들을 추출해주세요. 
                         단어장의 사진이 올라온 경우, 단어장에서 외우라고 하는 단어 모두를 추출합니다. 
@@ -210,7 +205,7 @@ with tab2:
     else:
         st.info("데이터가 없습니다.")
 
-# --- [탭 3: 실전 퀴즈] ---
+# --- [탭 3: 실전 퀴즈 (중복 출제 오류 수정)] ---
 with tab3:
     st.subheader("퀴즈 설정 및 실행")
     
@@ -229,11 +224,20 @@ with tab3:
             else:
                 c.execute("SELECT rowid, word, meaning, wrong_count FROM vocab WHERE category=? AND wrong_count >= ?", (quiz_cat, min_wrong))
             
-            all_words = c.fetchall()
-            st.write(f"현재 조건에 맞는 단어는 **{len(all_words)}개** 입니다.")
+            raw_all_words = c.fetchall()
             
-            if len(all_words) > 0:
-                num_questions = st.number_input("출제할 문제 수를 설정하십시오.", min_value=1, max_value=len(all_words), value=min(10, len(all_words)), step=1)
+            # 단어(word) 기준으로 중복 제거 로직 추가
+            unique_all_words = []
+            seen_words = set()
+            for row in raw_all_words:
+                if row[1] not in seen_words:
+                    seen_words.add(row[1])
+                    unique_all_words.append(row)
+            
+            st.write(f"현재 조건에 맞는 단어는 중복 제외 **{len(unique_all_words)}개** 입니다.")
+            
+            if len(unique_all_words) > 0:
+                num_questions = st.number_input("출제할 문제 수를 설정하십시오.", min_value=1, max_value=len(unique_all_words), value=min(10, len(unique_all_words)), step=1)
                 
                 c.execute("SELECT word, meaning FROM vocab")
                 global_pool = c.fetchall()
@@ -243,7 +247,7 @@ with tab3:
                         st.warning("객관식 보기를 만들기 위해 전체 데이터베이스에 최소 4개 이상의 단어가 필요합니다.")
                     else:
                         st.session_state.quiz_started = True
-                        st.session_state.quiz_pool = random.sample(all_words, num_questions)
+                        st.session_state.quiz_pool = random.sample(unique_all_words, num_questions)
                         st.session_state.current_idx = 0
                         st.session_state.graded = False
                         st.session_state.options = None
@@ -338,3 +342,57 @@ with tab3:
             if st.button("새 퀴즈 설정으로 돌아가기"):
                 st.session_state.quiz_started = False
                 st.rerun()
+
+# --- [탭 4: 데이터 백업/복구] ---
+with tab4:
+    st.subheader("데이터 백업 및 복구 관리")
+    st.write("무료 클라우드 서버 특성상 서버가 재부팅되면 저장된 단어가 초기화될 수 있습니다. 단어를 추가하거나 공부를 마친 후 아래 버튼을 통해 수시로 데이터를 백업해 두십시오.")
+    
+    c.execute("SELECT category, word, meaning, example, date, wrong_count FROM vocab")
+    all_rows = c.fetchall()
+    
+    if all_rows:
+        df_backup = pd.DataFrame(all_rows, columns=["category", "word", "meaning", "example", "date", "wrong_count"])
+        csv_data = df_backup.to_csv(index=False).encode('utf-8-sig')
+        
+        st.download_button(
+            label="📥 현재 단어장 CSV 파일로 다운로드 (백업)",
+            data=csv_data,
+            file_name=f"vocab_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+            mime="text/csv"
+        )
+    else:
+        st.info("데이터베이스에 백업할 단어가 없습니다.")
+        
+    st.divider()
+    
+    st.markdown("### 📤 백업 파일로 복구하기")
+    uploaded_backup = st.file_uploader("이전에 백업한 CSV 파일을 선택하십시오.", type=["csv"])
+    
+    if uploaded_backup is not None:
+        try:
+            df_restore = pd.read_csv(uploaded_backup)
+            required_cols = ["category", "word", "meaning", "example", "date", "wrong_count"]
+            
+            if all(col in df_restore.columns for col in required_cols):
+                st.success("올바른 양식의 백업 파일이 확인되었습니다.")
+                st.dataframe(df_restore.head(5), use_container_width=True)
+                
+                restore_mode = st.radio("복구 방식을 선택하십시오.", ["기존 단어장에 이어서 추가하기", "기존 데이터 전부 지우고 새로 덮어쓰기"])
+                
+                if st.button("🚀 데이터 복구 실행"):
+                    if restore_mode == "기존 데이터 전부 지우고 새로 덮어쓰기":
+                        c.execute("DELETE FROM vocab")
+                        conn.commit()
+                        
+                    for _, row in df_restore.iterrows():
+                        c.execute("INSERT INTO vocab (category, word, meaning, example, date, wrong_count) VALUES (?, ?, ?, ?, ?, ?)",
+                                  (str(row['category']), str(row['word']), str(row['meaning']), str(row['example']), str(row['date']), int(row['wrong_count'])))
+                    conn.commit()
+                    
+                    st.success(f"성공적으로 {len(df_restore)}개의 단어 데이터를 복구했습니다!")
+                    st.rerun()
+            else:
+                st.error("업로드된 파일의 형식이 올바르지 않습니다. 필수 열 정보가 누락되었습니다.")
+        except Exception as e:
+            st.error(f"파일을 파싱하는 중 오류가 발생했습니다: {e}")
