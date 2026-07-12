@@ -57,6 +57,11 @@ def handle_oauth_callback():
                 scopes=SCOPES,
                 redirect_uri=st.secrets["REDIRECT_URI"]
             )
+            
+            # (추가) 스트림릿 세션에 저장해둔 PKCE 코드 검증기(code_verifier) 복원
+            if 'oauth_code_verifier' in st.session_state:
+                flow.code_verifier = st.session_state['oauth_code_verifier']
+                
             flow.fetch_token(code=st.query_params['code'])
             creds = flow.credentials
             
@@ -464,6 +469,11 @@ with tab5:
                 redirect_uri=st.secrets["REDIRECT_URI"]
             )
             auth_url, _ = flow.authorization_url(prompt='consent', access_type='offline')
+            
+            # (추가) Missing code verifier 에러 방지를 위해 코드 검증기를 세션에 보관
+            if hasattr(flow, 'code_verifier'):
+                st.session_state['oauth_code_verifier'] = flow.code_verifier
+                
             st.markdown(f"### [👉 구글 계정으로 로그인하여 드라이브 연동하기]({auth_url})")
         except Exception as e:
             st.error(f"Secrets 설정에 문제가 있습니다. 설정 확인 요망: {e}")
