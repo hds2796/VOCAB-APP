@@ -8,9 +8,8 @@ import io
 import os
 from datetime import datetime, timedelta
 from google import genai
-from PIL import Image
 
-# 로컬 테스트 시 HTTPS 오류 우회
+# 로컬 및 클라우드 환경 테스트 시 HTTPS 오류 우회
 os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
 
 # --- 구글 로그인(OAuth 2.0) 및 드라이브 라이브러리 ---
@@ -19,7 +18,7 @@ from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
 
-# 구글 드라이브 접근 권한
+# 구글 드라이브 파일 접근 권한 범위
 SCOPES = ['https://www.googleapis.com/auth/drive.file']
 
 # --- [보안: 로그인 시스템] ---
@@ -49,6 +48,7 @@ if not check_password():
 
 # --- [구글 드라이브 OAuth 인증 콜백 처리] ---
 def handle_oauth_callback():
+    # URL에 인증 코드가 반환된 경우 처리
     if 'code' in st.query_params:
         try:
             client_config = json.loads(st.secrets["GOOGLE_CLIENT_CONFIG"])
@@ -86,7 +86,7 @@ def init_drive_service():
 def upload_to_google_drive(csv_string):
     service = init_drive_service()
     if not service:
-        raise Exception("구글 드라이브 로그인이 필요합니다.")
+        raise Exception("먼저 구글 드라이브로 로그인해야 합니다.")
         
     file_name = f"vocab_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
     file_metadata = {
@@ -102,7 +102,7 @@ def upload_to_google_drive(csv_string):
 def download_latest_from_google_drive():
     service = init_drive_service()
     if not service:
-        raise Exception("구글 드라이브 로그인이 필요합니다.")
+        raise Exception("먼저 구글 드라이브로 로그인해야 합니다.")
         
     folder_id = st.secrets["GOOGLE_FOLDER_ID"]
     query = f"'{folder_id}' in parents and mimeType = 'text/csv' and trashed = false"
@@ -211,10 +211,14 @@ with tab1:
                         response = client.models.generate_content(model='gemini-2.5-flash', contents=contents)
                         result_text = response.text.strip()
                         
+                        # UI 파싱 오류 방지를 위한 문자열 조합
                         prefix_json = "`" * 3 + "json"
                         prefix_empty = "`" * 3
-                        if result_text.startswith(prefix_json): result_text = result_text[7:-3]
-                        elif result_text.startswith(prefix_empty): result_text = result_text[3:-3]
+                        
+                        if result_text.startswith(prefix_json): 
+                            result_text = result_text[7:-3]
+                        elif result_text.startswith(prefix_empty): 
+                            result_text = result_text[3:-3]
                             
                         st.session_state.extracted_df = pd.DataFrame(json.loads(result_text))
                     except Exception as e: st.error(f"오류 발생: {e}")
@@ -449,7 +453,7 @@ with tab5:
     st.subheader("데이터 백업 및 복구 관리")
     st.write("무료 클라우드 서버 특성상 서버가 재부팅되면 저장된 단어가 초기화될 수 있습니다. 공부를 마친 후 수시로 데이터를 백업해 두십시오.")
     
-    # 1. 드라이브 로그인이 안 되어 있는 경우
+    # 드라이브 로그인이 안 되어 있는 경우 버튼 표시
     if 'drive_creds' not in st.session_state:
         st.warning("클라우드 자동 저장 및 복구 기능을 사용하려면 권한 인증이 필요합니다.")
         try:
@@ -462,9 +466,9 @@ with tab5:
             auth_url, _ = flow.authorization_url(prompt='consent', access_type='offline')
             st.markdown(f"### [👉 구글 계정으로 로그인하여 드라이브 연동하기]({auth_url})")
         except Exception as e:
-            st.error("Secrets 설정에 문제가 있습니다. 설정을 다시 확인해 주십시오.")
+            st.error(f"Secrets 설정에 문제가 있습니다. 설정 확인 요망: {e}")
     
-    # 2. 드라이브 로그인이 완료된 경우
+    # 드라이브 로그인이 완료된 경우 기능 활성화
     else:
         st.success("✅ 구글 드라이브 인증이 완료되었습니다.")
         
