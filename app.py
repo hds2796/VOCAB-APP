@@ -10,9 +10,17 @@ from PIL import Image
 # --- [보안: 로그인 시스템] ---
 def check_password():
     """Returns `True` if the user had a correct password."""
+    
+    # 1. URL 주소에 비밀번호가 포함되어 있는지 확인 (자동 로그인 통과)
+    if "pwd" in st.query_params:
+        if st.query_params["pwd"] == st.secrets["APP_PASSWORD"]:
+            st.session_state["password_correct"] = True
+
+    # 2. 이미 로그인된 상태인지 확인
     if st.session_state.get("password_correct", False):
         return True
 
+    # 3. 위 두 조건에 해당하지 않으면 일반 로그인 화면 출력
     st.title("🔒 나만의 단어장 로그인")
     st.warning("⚠️ **경고: 처음에 설정한 비밀번호를 잃어버리면 절대 찾을 수 없습니다. 꼭 기억해 주세요!**")
     
