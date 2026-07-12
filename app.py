@@ -5,14 +5,22 @@ import random
 import pandas as pd
 import re
 import io
+import os
 from datetime import datetime, timedelta
 from google import genai
 from PIL import Image
 
-# --- 구글 드라이브 연동 라이브러리 ---
-from google.oauth2 import service_account
+# 로컬 테스트 시 HTTPS 오류 우회
+os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
+
+# --- 구글 로그인(OAuth 2.0) 및 드라이브 라이브러리 ---
+from google.oauth2.credentials import Credentials
+from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
+
+# 구글 드라이브 접근 권한
+SCOPES = ['https://www.googleapis.com/auth/drive.file']
 
 # --- [보안: 로그인 시스템] ---
 def check_password():
@@ -24,7 +32,7 @@ def check_password():
         return True
 
     st.title("🔒 나만의 단어장 로그인")
-    st.warning("⚠️ **경고: 처음에 설정한 비밀번호를 잃어버리면 절대 찾을 수 없습니다. 꼭 기억해 주세요!**")
+    st.warning("⚠️ **경고: 처음에 설정한 비밀번호를 잃어버리면 절대 찾을 수 없습니다.**")
     
     password = st.text_input("비밀번호를 입력하세요", type="password")
     
@@ -39,12 +47,47 @@ def check_password():
 if not check_password():
     st.stop()
 
-# --- [구글 드라이브 백업 업로드 함수] ---
+# --- [구글 드라이브 OAuth 인증 콜백 처리] ---
+def handle_oauth_callback():
+    if 'code' in st.query_params:
+        try:
+            client_config = json.loads(st.secrets["GOOGLE_CLIENT_CONFIG"])
+            flow = Flow.from_client_config(
+                client_config,
+                scopes=SCOPES,
+                redirect_uri=st.secrets["REDIRECT_URI"]
+            )
+            flow.fetch_token(code=st.query_params['code'])
+            creds = flow.credentials
+            
+            # 인증 토큰 세션 저장
+            st.session_state['drive_creds'] = {
+                'token': creds.token,
+                'refresh_token': creds.refresh_token,
+                'token_uri': creds.token_uri,
+                'client_id': creds.client_id,
+                'client_secret': creds.client_secret,
+                'scopes': creds.scopes
+            }
+            # URL의 쿼리 파라미터 초기화
+            st.query_params.clear()
+            st.rerun()
+        except Exception as e:
+            st.error(f"구글 로그인 인증 오류가 발생했습니다: {e}")
+
+handle_oauth_callback()
+
+def init_drive_service():
+    if 'drive_creds' in st.session_state:
+        creds = Credentials.from_authorized_user_info(st.session_state['drive_creds'], SCOPES)
+        return build('drive', 'v3', credentials=creds)
+    return None
+
 def upload_to_google_drive(csv_string):
-    creds_info = json.loads(st.secrets["GOOGLE_SERVICE_ACCOUNT"])
-    creds = service_account.Credentials.from_service_account_info(creds_info)
-    service = build('drive', 'v3', credentials=creds)
-    
+    service = init_drive_service()
+    if not service:
+        raise Exception("구글 드라이브 로그인이 필요합니다.")
+        
     file_name = f"vocab_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
     file_metadata = {
         'name': file_name,
@@ -56,14 +99,12 @@ def upload_to_google_drive(csv_string):
     file = service.files().create(body=file_metadata, media_body=media, fields='id').execute()
     return file.get('id')
 
-# --- [구글 드라이브 최신 백업 다운로드 함수] ---
 def download_latest_from_google_drive():
-    creds_info = json.loads(st.secrets["GOOGLE_SERVICE_ACCOUNT"])
-    creds = service_account.Credentials.from_service_account_info(creds_info)
-    service = build('drive', 'v3', credentials=creds)
-    
+    service = init_drive_service()
+    if not service:
+        raise Exception("구글 드라이브 로그인이 필요합니다.")
+        
     folder_id = st.secrets["GOOGLE_FOLDER_ID"]
-    
     query = f"'{folder_id}' in parents and mimeType = 'text/csv' and trashed = false"
     results = service.files().list(
         q=query,
@@ -93,38 +134,25 @@ conn.commit()
 try:
     c.execute("ALTER TABLE vocab ADD COLUMN wrong_count INTEGER DEFAULT 0")
     conn.commit()
-except sqlite3.OperationalError:
-    pass
-
+except sqlite3.OperationalError: pass
 try:
     c.execute("ALTER TABLE vocab ADD COLUMN last_tested TEXT")
     conn.commit()
-except sqlite3.OperationalError:
-    pass
+except sqlite3.OperationalError: pass
 
 # 세션 상태 초기화
-if 'extracted_df' not in st.session_state:
-    st.session_state.extracted_df = None
-if 'quiz_started' not in st.session_state:
-    st.session_state.quiz_started = False
-if 'quiz_pool' not in st.session_state:
-    st.session_state.quiz_pool = []
-if 'current_idx' not in st.session_state:
-    st.session_state.current_idx = 0
-if 'graded' not in st.session_state:
-    st.session_state.graded = False
-if 'options' not in st.session_state:
-    st.session_state.options = None
-if 'options_pairs' not in st.session_state:
-    st.session_state.options_pairs = None
-if 'last_result' not in st.session_state:
-    st.session_state.last_result = None
-if 'score' not in st.session_state:
-    st.session_state.score = 0
-if 'wrong_answers' not in st.session_state:
-    st.session_state.wrong_answers = []
+if 'extracted_df' not in st.session_state: st.session_state.extracted_df = None
+if 'quiz_started' not in st.session_state: st.session_state.quiz_started = False
+if 'quiz_pool' not in st.session_state: st.session_state.quiz_pool = []
+if 'current_idx' not in st.session_state: st.session_state.current_idx = 0
+if 'graded' not in st.session_state: st.session_state.graded = False
+if 'options' not in st.session_state: st.session_state.options = None
+if 'options_pairs' not in st.session_state: st.session_state.options_pairs = None
+if 'last_result' not in st.session_state: st.session_state.last_result = None
+if 'score' not in st.session_state: st.session_state.score = 0
+if 'wrong_answers' not in st.session_state: st.session_state.wrong_answers = []
 
-# 2. 웹사이트 화면 구성 및 UI 커스텀
+# 2. 웹사이트 화면 구성
 st.set_page_config(page_title="단어장 앱", page_icon="📝")
 
 st.markdown("""
@@ -183,14 +211,10 @@ with tab1:
                         response = client.models.generate_content(model='gemini-2.5-flash', contents=contents)
                         result_text = response.text.strip()
                         
-                        # UI 파싱 오류 방지를 위한 문자열 연산 처리
                         prefix_json = "`" * 3 + "json"
                         prefix_empty = "`" * 3
-                        
-                        if result_text.startswith(prefix_json): 
-                            result_text = result_text[7:-3]
-                        elif result_text.startswith(prefix_empty): 
-                            result_text = result_text[3:-3]
+                        if result_text.startswith(prefix_json): result_text = result_text[7:-3]
+                        elif result_text.startswith(prefix_empty): result_text = result_text[3:-3]
                             
                         st.session_state.extracted_df = pd.DataFrame(json.loads(result_text))
                     except Exception as e: st.error(f"오류 발생: {e}")
@@ -425,68 +449,87 @@ with tab5:
     st.subheader("데이터 백업 및 복구 관리")
     st.write("무료 클라우드 서버 특성상 서버가 재부팅되면 저장된 단어가 초기화될 수 있습니다. 공부를 마친 후 수시로 데이터를 백업해 두십시오.")
     
-    c.execute("SELECT category, word, meaning, example, date, wrong_count, last_tested FROM vocab")
-    all_rows = c.fetchall()
-    
-    df_backup = pd.DataFrame(all_rows, columns=["category", "word", "meaning", "example", "date", "wrong_count", "last_tested"])
-    csv_data = df_backup.to_csv(index=False)
-    csv_bytes = csv_data.encode('utf-8-sig')
-    
-    st.markdown("### 📥 단어장 백업 (서버 -> 보관소)")
-    col_b1, col_b2 = st.columns(2)
-    with col_b1:
-        st.download_button(label="기기(폰/PC)에 파일 다운로드", data=csv_bytes, file_name=f"vocab_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv", mime="text/csv", use_container_width=True)
-    with col_b2:
-        if st.button("🚀 구글 드라이브 자동 저장", use_container_width=True):
-            with st.spinner('구글 드라이브 업로드 중...'):
-                try:
-                    upload_to_google_drive(csv_data)
-                    st.success("구글 드라이브 백업 완료!")
-                except Exception as e: st.error(f"업로드 실패: {e}")
-        
-    st.divider()
-    
-    st.markdown("### 📤 단어장 복구 (보관소 -> 서버)")
-    if st.button("🔄 구글 드라이브에서 최신 백업 즉시 불러오기", use_container_width=True):
-        with st.spinner('구글 드라이브에서 최신 백업 탐색 중...'):
-            try:
-                content_bytes, file_name = download_latest_from_google_drive()
-                df_restore = pd.read_csv(io.BytesIO(content_bytes))
-                
-                c.execute("DELETE FROM vocab")
-                for _, row in df_restore.iterrows():
-                    last_t = row.get("last_tested", None)
-                    last_t = last_t if pd.notna(last_t) else None
-                    c.execute("INSERT INTO vocab (category, word, meaning, example, date, wrong_count, last_tested) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                              (str(row['category']), str(row['word']), str(row['meaning']), str(row['example']), str(row['date']), int(row['wrong_count']), last_t))
-                conn.commit()
-                st.success(f"성공! 최신 백업 파일 [{file_name}] 데이터를 정상적으로 불러왔습니다.")
-                st.rerun()
-            except Exception as e:
-                st.error(f"불러오기 실패: {e}")
-                
-    st.caption("또는 아래에 직접 백업 파일을 업로드하여 복구할 수도 있습니다.")
-    uploaded_backup = st.file_uploader("이전에 백업한 CSV 파일을 선택하십시오.", type=["csv"])
-    
-    if uploaded_backup is not None:
+    # 1. 드라이브 로그인이 안 되어 있는 경우
+    if 'drive_creds' not in st.session_state:
+        st.warning("클라우드 자동 저장 및 복구 기능을 사용하려면 권한 인증이 필요합니다.")
         try:
-            df_restore = pd.read_csv(uploaded_backup)
-            required_cols = ["category", "word", "meaning", "example", "date", "wrong_count"]
+            client_config = json.loads(st.secrets["GOOGLE_CLIENT_CONFIG"])
+            flow = Flow.from_client_config(
+                client_config,
+                scopes=SCOPES,
+                redirect_uri=st.secrets["REDIRECT_URI"]
+            )
+            auth_url, _ = flow.authorization_url(prompt='consent', access_type='offline')
+            st.markdown(f"### [👉 구글 계정으로 로그인하여 드라이브 연동하기]({auth_url})")
+        except Exception as e:
+            st.error("Secrets 설정에 문제가 있습니다. 설정을 다시 확인해 주십시오.")
+    
+    # 2. 드라이브 로그인이 완료된 경우
+    else:
+        st.success("✅ 구글 드라이브 인증이 완료되었습니다.")
+        
+        c.execute("SELECT category, word, meaning, example, date, wrong_count, last_tested FROM vocab")
+        all_rows = c.fetchall()
+        
+        df_backup = pd.DataFrame(all_rows, columns=["category", "word", "meaning", "example", "date", "wrong_count", "last_tested"])
+        csv_data = df_backup.to_csv(index=False)
+        csv_bytes = csv_data.encode('utf-8-sig')
+        
+        st.markdown("### 📥 단어장 백업 (서버 -> 보관소)")
+        col_b1, col_b2 = st.columns(2)
+        with col_b1:
+            st.download_button(label="기기(폰/PC)에 파일 다운로드", data=csv_bytes, file_name=f"vocab_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv", mime="text/csv", use_container_width=True)
+        with col_b2:
+            if st.button("🚀 구글 드라이브 자동 저장", use_container_width=True):
+                with st.spinner('구글 드라이브 업로드 중...'):
+                    try:
+                        upload_to_google_drive(csv_data)
+                        st.success("구글 드라이브 백업 완료!")
+                    except Exception as e: st.error(f"업로드 실패: {e}")
             
-            if all(col in df_restore.columns for col in required_cols):
-                st.success("올바른 양식의 백업 파일이 확인되었습니다.")
-                st.dataframe(df_restore.head(5), use_container_width=True)
-                restore_mode = st.radio("복구 방식을 선택하십시오.", ["기존 단어장에 이어서 추가하기", "기존 데이터 전부 지우고 새로 덮어쓰기"])
-                
-                if st.button("🚀 업로드 파일로 복구 실행", use_container_width=True):
-                    if restore_mode == "기존 데이터 전부 지우고 새로 덮어쓰기": c.execute("DELETE FROM vocab")
+        st.divider()
+        
+        st.markdown("### 📤 단어장 복구 (보관소 -> 서버)")
+        if st.button("🔄 구글 드라이브에서 최신 백업 즉시 불러오기", use_container_width=True):
+            with st.spinner('구글 드라이브에서 최신 백업 탐색 중...'):
+                try:
+                    content_bytes, file_name = download_latest_from_google_drive()
+                    df_restore = pd.read_csv(io.BytesIO(content_bytes))
+                    
+                    c.execute("DELETE FROM vocab")
                     for _, row in df_restore.iterrows():
                         last_t = row.get("last_tested", None)
                         last_t = last_t if pd.notna(last_t) else None
                         c.execute("INSERT INTO vocab (category, word, meaning, example, date, wrong_count, last_tested) VALUES (?, ?, ?, ?, ?, ?, ?)",
                                   (str(row['category']), str(row['word']), str(row['meaning']), str(row['example']), str(row['date']), int(row['wrong_count']), last_t))
                     conn.commit()
-                    st.success(f"성공적으로 데이터를 복구했습니다!")
+                    st.success(f"성공! 최신 백업 파일 [{file_name}] 데이터를 정상적으로 불러왔습니다.")
                     st.rerun()
-            else: st.error("필수 열 정보가 누락되었습니다.")
-        except Exception as e: st.error(f"오류 발생: {e}")
+                except Exception as e:
+                    st.error(f"불러오기 실패: {e}")
+                    
+        st.caption("또는 아래에 직접 백업 파일을 업로드하여 복구할 수도 있습니다.")
+        uploaded_backup = st.file_uploader("이전에 백업한 CSV 파일을 선택하십시오.", type=["csv"])
+        
+        if uploaded_backup is not None:
+            try:
+                df_restore = pd.read_csv(uploaded_backup)
+                required_cols = ["category", "word", "meaning", "example", "date", "wrong_count"]
+                
+                if all(col in df_restore.columns for col in required_cols):
+                    st.success("올바른 양식의 백업 파일이 확인되었습니다.")
+                    st.dataframe(df_restore.head(5), use_container_width=True)
+                    restore_mode = st.radio("복구 방식을 선택하십시오.", ["기존 단어장에 이어서 추가하기", "기존 데이터 전부 지우고 새로 덮어쓰기"])
+                    
+                    if st.button("🚀 업로드 파일로 복구 실행", use_container_width=True):
+                        if restore_mode == "기존 데이터 전부 지우고 새로 덮어쓰기": c.execute("DELETE FROM vocab")
+                        for _, row in df_restore.iterrows():
+                            last_t = row.get("last_tested", None)
+                            last_t = last_t if pd.notna(last_t) else None
+                            c.execute("INSERT INTO vocab (category, word, meaning, example, date, wrong_count, last_tested) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                                      (str(row['category']), str(row['word']), str(row['meaning']), str(row['example']), str(row['date']), int(row['wrong_count']), last_t))
+                        conn.commit()
+                        st.success(f"성공적으로 데이터를 복구했습니다!")
+                        st.rerun()
+                else: st.error("필수 열 정보가 누락되었습니다.")
+            except Exception as e: st.error(f"오류 발생: {e}")
