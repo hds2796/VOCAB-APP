@@ -3,6 +3,7 @@ import sqlite3
 import json
 import random
 import pandas as pd
+import re
 from datetime import datetime
 from google import genai
 from PIL import Image
@@ -87,7 +88,7 @@ with tab1:
     c.execute("SELECT DISTINCT category FROM vocab")
     db_categories = [row[0] for row in c.fetchall() if row[0]]
     
-    base_categories = ["토플 영단어", "ETC"]
+    base_categories = ["토플 영단어", "경제학 용어", "ETC"]
     for cat in db_categories:
         if cat not in base_categories:
             base_categories.append(cat)
@@ -105,7 +106,7 @@ with tab1:
     if uploaded_files:
         st.write(f"📎 총 {len(uploaded_files)}개의 파일이 선택되었습니다.")
         
-        if st.button("AI 추출 실행"):
+        if st.button("AI 분석 실행"):
             if not API_KEY:
                 st.error("API 키 오류")
             else:
@@ -163,7 +164,7 @@ with tab1:
                 st.session_state.extracted_df = None
                 st.rerun()
 
-# --- [탭 2: 누적 단어 확인 (플래시카드 뷰 추가)] ---
+# --- [탭 2: 누적 단어 확인] ---
 with tab2:
     st.subheader("데이터베이스 목록 및 관리")
     
@@ -206,7 +207,6 @@ with tab2:
         words = c.fetchall()
         
         if words:
-            # 표 형식 (수정 가능)
             if view_style == "표(엑셀) 형식으로 수정/관리":
                 df_existing = pd.DataFrame(words, columns=["ID", "카테고리", "단어", "뜻", "예문", "틀린 횟수"])
                 st.write("✏️ **데이터 수정 (셀 더블클릭 후 수정 가능)**")
@@ -236,7 +236,6 @@ with tab2:
                     else:
                         st.warning("삭제할 단어를 먼저 선택해 주십시오.")
                         
-            # 플래시카드 형식 (예문 보기)
             else:
                 st.write("💡 **단어 상자를 클릭하면 뜻과 예문이 펼쳐집니다.**")
                 for w in words:
@@ -249,7 +248,7 @@ with tab2:
     else:
         st.info("데이터가 없습니다.")
 
-# --- [탭 3: 실전 퀴즈 (정답 확인 시 예문 노출)] ---
+# --- [탭 3: 실전 퀴즈] ---
 with tab3:
     st.subheader("퀴즈 설정 및 실행")
     
@@ -263,7 +262,6 @@ with tab3:
             quiz_direction = st.radio("출제 방식", ["영단어를 보고 뜻 맞추기", "뜻을 보고 영단어 맞추기"], horizontal=True)
             quiz_mode = st.radio("출제 대상", ["모든 단어 대상", "틀린 단어(오답)만 모아서 시험보기"], horizontal=True)
             
-            # 예문(example) 열까지 모두 불러오도록 쿼리 수정
             query = "SELECT rowid, word, meaning, example, wrong_count FROM vocab"
             conditions = []
             params = []
@@ -322,7 +320,6 @@ with tab3:
             st.write(f"### 문제 {st.session_state.current_idx + 1} / {len(st.session_state.quiz_pool)}")
             
             current_q = st.session_state.quiz_pool[st.session_state.current_idx]
-            # example 데이터 언패킹 추가
             q_id, raw_word, raw_meaning, raw_example, q_wrong_count = current_q
             
             c.execute("SELECT word, meaning FROM vocab")
@@ -337,6 +334,19 @@ with tab3:
                 
             st.info(f"문제: **{q_text}** (현재까지 틀린 횟수: {q_wrong_count}회)")
             
+            # --- [추가/수정된 부분: 예문 힌트 제공 아코디언] ---
+            with st.expander("👉 여기를 클릭해서 예문(힌트) 보기"):
+                if raw_example:
+                    # 뜻을 보고 영단어를 맞추는 방향일 때 정답 노출 방지 처리
+                    if st.session_state.q_dir == "뜻을 보고 영단어 맞추기":
+                        hidden_example = re.sub(re.escape(raw_word), "_____", raw_example, flags=re.IGNORECASE)
+                        st.write(hidden_example)
+                    else:
+                        st.write(raw_example)
+                else:
+                    st.write("등록된 예문이 없습니다.")
+            # ---------------------------------------------------
+
             if st.session_state.q_type == "객관식":
                 if st.session_state.options_pairs is None:
                     wrong_pool_pairs = [w for w in global_pool if w[0] != raw_word and w[1] != raw_meaning]
@@ -384,8 +394,8 @@ with tab3:
                 else:
                     st.error(f"오답입니다. 정답: {q_ans}")
                 
-                # 정답 확인 후 예문 노출 패널 추가
-                with st.expander("📖 예문 확인하기"):
+                # 채점이 끝난 후에는 온전한 예문 패널 노출 (기존 코드 유지)
+                with st.expander("📖 전체 예문 다시 확인하기"):
                     st.write(raw_example if raw_example else "등록된 예문이 없습니다.")
                 
                 if st.session_state.q_type == "객관식":
@@ -479,4 +489,3 @@ with tab4:
                 st.error("업로드된 파일의 형식이 올바르지 않습니다. 필수 열 정보가 누락되었습니다.")
         except Exception as e:
             st.error(f"파일을 파싱하는 중 오류가 발생했습니다: {e}")
-            
