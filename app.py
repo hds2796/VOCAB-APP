@@ -87,7 +87,7 @@ with tab1:
     c.execute("SELECT DISTINCT category FROM vocab")
     db_categories = [row[0] for row in c.fetchall() if row[0]]
     
-    base_categories = ["토플 영단어", "경제학 용어", "ETC"]
+    base_categories = ["토플 영단어", "ETC"]
     for cat in db_categories:
         if cat not in base_categories:
             base_categories.append(cat)
@@ -105,7 +105,7 @@ with tab1:
     if uploaded_files:
         st.write(f"📎 총 {len(uploaded_files)}개의 파일이 선택되었습니다.")
         
-        if st.button("AI 분석 실행"):
+        if st.button("AI 추출 실행"):
             if not API_KEY:
                 st.error("API 키 오류")
             else:
