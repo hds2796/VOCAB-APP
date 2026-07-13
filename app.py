@@ -23,7 +23,7 @@ from google import genai
 SCOPES = ['https://www.googleapis.com/auth/drive']
 
 # --- [페이지 설정] ---
-st.set_page_config(page_title="AI 증시 분석 플랫폼", page_icon="📊", layout="wide")
+st.set_page_config(page_title="AI 경제 뉴스 분석", page_icon="📊", layout="wide")
 
 # --- [API 키 설정] ---
 GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY", "")
@@ -176,6 +176,8 @@ def download_latest_from_google_drive():
 # --- [세션 상태 관리] ---
 if 'analysis_results' not in st.session_state: st.session_state.analysis_results = {}
 if 'overall_analysis' not in st.session_state: st.session_state.overall_analysis = None
+if 'macro_start' not in st.session_state: st.session_state.macro_start = 1
+if 'sector_starts' not in st.session_state: st.session_state.sector_starts = {}
 
 # --- [시장 지표 수집 함수] ---
 @st.cache_data(ttl=60)
@@ -188,10 +190,20 @@ def get_market_data():
             data = requests.get(url, headers=headers, timeout=3).json()['datas'][0]
             current = float(data['closePrice'].replace(',', ''))
             diff = float(data['compareToPreviousClosePrice'].replace(',', ''))
-            diff_pct = float(data['fluctuationsRatio'])
-            if diff_pct < 0: diff = -diff
+            diff_pct = float(data['fluctuationsRatio'].replace(',', ''))
+            
+            # API 내부의 상태 코드를 직접 추출 (1:상한, 2:상승, 3:보합, 4:하락, 5:하한)
+            f_code = str(data.get('compareToPreviousPrice', {}).get('code', '3'))
+            if f_code in ['4', '5']:
+                diff = -abs(diff)
+                diff_pct = -abs(diff_pct)
+            else:
+                diff = abs(diff)
+                diff_pct = abs(diff_pct)
+                
             return {"current": current, "diff": diff, "diff_pct": diff_pct}
-        except: return {"current": 0, "diff": 0, "diff_pct": 0.0}
+        except Exception as e: 
+            return {"current": 0, "diff": 0, "diff_pct": 0.0}
 
     results["코스피 (실시간)"] = fetch_naver_realtime("KOSPI")
     results["코스닥 (실시간)"] = fetch_naver_realtime("KOSDAQ")
@@ -213,11 +225,11 @@ def clean_html(raw_html):
     return BeautifulSoup(raw_html, "html.parser").get_text()
 
 @st.cache_data(ttl=1800)
-def get_naver_news(query, display=10):
+def get_naver_news(query, display=10, start=1):
     if not NAVER_CLIENT_ID or not NAVER_CLIENT_SECRET: return []
     url = "https://naverapihub.apigw.ntruss.com/search/v1/news"
     headers = {"X-NCP-APIGW-API-KEY-ID": NAVER_CLIENT_ID, "X-NCP-APIGW-API-KEY": NAVER_CLIENT_SECRET}
-    params = {"query": query, "display": display, "sort": "sim", "format": "json"}
+    params = {"query": query, "display": display, "start": start, "sort": "sim", "format": "json"}
     
     response = requests.get(url, headers=headers, params=params)
     if response.status_code == 200:
@@ -278,7 +290,6 @@ with tab1:
             st.session_state.overall_analysis = None
             st.rerun()
 
-    # NCP 검색 API가 정상적으로 인식할 수 있도록 검색 쿼리 단순화
     macro_query = "증시 시황 OR 글로벌 경제 OR 주식 시장"
     top_news = get_naver_news(macro_query, display=10, start=st.session_state.macro_start)
     
@@ -298,11 +309,11 @@ with tab1:
         for i, news in enumerate(top_news):
             st.markdown(f"**{i+1}. [{news['title']}]({news['link']})**")
             st.caption(f"{news['published']} | {news['summary']}")
-            if st.button("이 기사 심층 분석", key=f"t1_btn_{i}"):
+            if st.button("이 기사 심층 분석", key=f"t1_btn_{st.session_state.macro_start}_{i}"):
                 st.session_state.analysis_results[news['link']] = analyze_single_news(news['title'], news['summary'])
             if news['link'] in st.session_state.analysis_results:
                 st.info(st.session_state.analysis_results[news['link']])
-                if st.button("💾 이 리포트 스크랩하기", key=f"t1_scrap_{i}"):
+                if st.button("💾 이 리포트 스크랩하기", key=f"t1_scrap_{st.session_state.macro_start}_{i}"):
                     c.execute("INSERT INTO scrapbook (title, link, summary, analysis, scrap_date) VALUES (?, ?, ?, ?, ?)",
                               (news['title'], news['link'], news['summary'], st.session_state.analysis_results[news['link']], datetime.now().strftime("%Y-%m-%d %H:%M")))
                     conn.commit()
@@ -317,7 +328,7 @@ with tab2:
     with col_s1:
         selected_sector = st.selectbox("관심 섹터 선택", list(sectors.keys()))
     with col_s2:
-        st.markdown("<br>", unsafe_allow_html=True) # 줄맞춤용 여백
+        st.markdown("<br>", unsafe_allow_html=True)
         if st.button("🔄 다른 기사 보기", key="refresh_sector", use_container_width=True):
             if selected_sector not in st.session_state.sector_starts:
                 st.session_state.sector_starts[selected_sector] = 1
@@ -344,11 +355,11 @@ with tab2:
     for i, news in enumerate(sector_news):
         with st.expander(f"📰 {news['title']}"):
             st.markdown(f"[원문 읽기]({news['link']})\n\n{news['summary']}")
-            if st.button("AI 분석 실행", key=f"t2_btn_{selected_sector}_{i}"):
+            if st.button("AI 분석 실행", key=f"t2_btn_{selected_sector}_{st.session_state.sector_starts[selected_sector]}_{i}"):
                 st.session_state.analysis_results[news['link']] = analyze_single_news(news['title'], news['summary'])
             if news['link'] in st.session_state.analysis_results:
                 st.info(st.session_state.analysis_results[news['link']])
-                if st.button("💾 스크랩", key=f"t2_scrap_{selected_sector}_{i}"):
+                if st.button("💾 스크랩", key=f"t2_scrap_{selected_sector}_{st.session_state.sector_starts[selected_sector]}_{i}"):
                     c.execute("INSERT INTO scrapbook (title, link, summary, analysis, scrap_date) VALUES (?, ?, ?, ?, ?)",
                               (news['title'], news['link'], news['summary'], st.session_state.analysis_results[news['link']], datetime.now().strftime("%Y-%m-%d %H:%M")))
                     conn.commit()
@@ -374,7 +385,7 @@ with tab3:
         for p_id, p_name in portfolio:
             st.markdown(f"#### 📌 [{p_name}] 최신 동향")
             
-            # 가십(연봉 등)을 제외하고 주가, 실적 등 비즈니스 코어 뉴스만 엄선하여 검색
+            # 주가, 실적 등 비즈니스 코어 뉴스만 검색하도록 쿼리 설정
             query = f"{p_name} 주가 OR {p_name} 실적 OR {p_name} 목표가 OR {p_name} 수주"
             port_news = get_naver_news(query, display=3)
             
