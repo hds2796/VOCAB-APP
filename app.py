@@ -197,7 +197,7 @@ if 'wrong_answers' not in st.session_state: st.session_state.wrong_answers = []
 
 
 # 2. 웹사이트 화면 구성
-st.set_page_config(page_title="단어장 앱", page_icon="📝")
+st.set_page_config(page_title="VOCAB", page_icon="📝")
 
 st.markdown("""
 <style>
@@ -208,7 +208,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-st.title("단어장 앱")
+st.title("VOCAB")
 
 c.execute("SELECT COUNT(*) FROM vocab")
 total_vocab_count = c.fetchone()[0]
@@ -223,7 +223,7 @@ with tab1:
 st.subheader("사진 또는 PDF로 단어 추가")
 c.execute("SELECT DISTINCT category FROM vocab")
 db_categories = [row[0] for row in c.fetchall() if row[0]]
-    base_categories = ["토플 영단어", "경제학 용어", "ETC"]
+    base_categories = ["토플 영단어", "ETC"]
     base_categories = ["토플 영단어"]
 for cat in db_categories:
 if cat not in base_categories: base_categories.append(cat)
@@ -236,7 +236,7 @@ uploaded_files = st.file_uploader("단어가 있는 사진 또는 PDF 파일 업
 
 if uploaded_files:
 st.write(f"📎 총 {len(uploaded_files)}개의 파일이 선택되었습니다.")
-if st.button("AI 분석 실행"):
+if st.button("AI 추출 실행"):
 if not API_KEY: st.error("API 키 오류")
 else:
 with st.spinner('모든 파일을 통합 분석 중입니다...'):
@@ -249,6 +249,9 @@ contents.append(types.Part.from_bytes(data=f.read(), mime_type=f.type))
 
 prompt = """
                        업로드된 이미지 또는 PDF 문서들에서 중요한 영어 단어들을 모두 추출해주세요.
+                       단어장 파일의 경우 단어장에서 외우도록 한 모든 단어를 추출합니다.
+                       그 외에는 외울만하다고 생각되는 단어를 추출합니다.
+                       즉, I'm, No와 유사한 역할들을 하는 단어는 추출하지 않습니다.
                        반드시 아래 형태의 JSON 배열로만 답변해야 합니다:
                        [ {"word": "단어", "meaning": "한국어 뜻", "example": "영어 예문"} ]
                        """
