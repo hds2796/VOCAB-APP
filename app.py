@@ -369,13 +369,27 @@ with tab3:
             if st.button(f"{p_name} ✖", key=f"del_port_{p_id}"):
                 c.execute("DELETE FROM portfolio WHERE id=?", (p_id,)); conn.commit(); st.rerun()
         st.divider()
-        port_news = get_naver_news(" OR ".join([p[1] for p in portfolio]), display=10)
-        for i, news in enumerate(port_news):
-            with st.expander(f"📰 {news['title']}"):
-                if st.button("분석하기", key=f"t3_btn_{i}"):
-                    st.session_state.analysis_results[news['link']] = analyze_single_news(news['title'], news['summary'])
-                if news['link'] in st.session_state.analysis_results:
-                    st.info(st.session_state.analysis_results[news['link']])
+        
+        st.write(f"🔍 **등록된 종목 관련 핵심 비즈니스 뉴스** (가십성 기사 제외)")
+        for p_id, p_name in portfolio:
+            st.markdown(f"#### 📌 [{p_name}] 최신 동향")
+            
+            # 가십(연봉 등)을 제외하고 주가, 실적 등 비즈니스 코어 뉴스만 엄선하여 검색
+            query = f"{p_name} 주가 OR {p_name} 실적 OR {p_name} 목표가 OR {p_name} 수주"
+            port_news = get_naver_news(query, display=3)
+            
+            if port_news:
+                for i, news in enumerate(port_news):
+                    with st.expander(f"📰 {news['title']}"):
+                        st.caption(news['published'])
+                        st.write(news['summary'])
+                        if st.button("이 기사 분석하기", key=f"t3_btn_{p_id}_{i}"):
+                            st.session_state.analysis_results[news['link']] = analyze_single_news(news['title'], news['summary'])
+                        if news['link'] in st.session_state.analysis_results:
+                            st.info(st.session_state.analysis_results[news['link']])
+            else:
+                st.info(f"'{p_name}' 관련 비즈니스 뉴스가 없습니다.")
+            st.markdown("---")
     else: st.info("등록된 관심종목이 없습니다.")
 
 # [탭 4: 스크랩북]
