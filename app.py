@@ -221,7 +221,7 @@ with tab1:
                                     img = Image.open(uploaded_file)
                                     contents.append(img)
                                 
-                            response = client.models.generate_content(model='gemini-3.1-flash-lte', contents=contents)
+                            response = client.models.generate_content(model='gemini-3.1-flash-lite', contents=contents)
                             result_text = response.text.strip().replace("```json", "").replace("```", "").strip()
                             st.session_state.extracted_df = pd.DataFrame(json.loads(result_text))
                         except Exception as e:
