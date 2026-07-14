@@ -6,6 +6,8 @@ import json
 import io
 import os
 import re
+import PyPDF2
+from PIL import Image
 from datetime import datetime, timedelta
 from google import genai
 
@@ -22,7 +24,7 @@ from googleapiclient.http import MediaIoBaseUpload
 SCOPES = ['https://www.googleapis.com/auth/drive']
 
 # --- [페이지 설정] ---
-st.set_page_config(page_title="AI 스마트 단어장", page_icon="📖", layout="wide")
+st.set_page_config(page_title="Project1_VOCAB", page_icon="📖", layout="wide")
 
 # --- [API 키 설정] ---
 GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY", "")
@@ -126,13 +128,13 @@ def download_latest_from_google_drive():
 if 'quiz_started' not in st.session_state: st.session_state.quiz_started = False
 if 'extracted_df' not in st.session_state: st.session_state.extracted_df = None
 
-st.title("📖 Project1_TOEFL")
+st.title("📖 Project1_VOCAB")
 tab1, tab2, tab3, tab4, tab5 = st.tabs(["➕ 단어 추가", "📚 누적 단어 확인", "🎯 실전 퀴즈", "📊 학습 통계", "⚙️ 데이터 백업/복구"])
 
 # --- [탭 1: 단어 추가] ---
 with tab1:
     st.subheader("새로운 단어 등록")
-    add_mode = st.radio("등록 방식 선택", ["수동 입력", "AI 자동 추출 (영어 지문 입력)"], horizontal=True)
+    add_mode = st.radio("등록 방식 선택", ["수동 입력", "AI 자동 추출 (영어 지문 입력)", "AI 자동 추출 (이미지/PDF 파일 업로드)"], horizontal=True)
     
     c.execute("SELECT DISTINCT category FROM vocab")
     existing_categories = [row[0] for row in c.fetchall() if row[0]]
@@ -158,38 +160,86 @@ with tab1:
                     conn.commit()
                     st.success(f"'{word}' 단어가 저장되었습니다.")
                 else: st.error("영단어와 뜻을 모두 입력하십시오.")
-    else:
-        with st.form("ai_extract_form"):
-            text_input = st.text_area("영어 지문을 입력하십시오. AI가 핵심 단어 10개를 자동으로 추출합니다.", height=200)
-            if st.form_submit_button("🤖 AI 단어 추출"):
-                if not text_input.strip(): st.error("지문을 입력하십시오.")
+                
+    elif add_mode == "AI 자동 추출 (영어 지문 입력)":
+        with st.form("ai_text_extract_form"):
+            text_input = st.text_area("영어 지문 또는 단어 목록을 입력하십시오.", height=200)
+            if st.form_submit_button("🤖 텍스트에서 단어 추출"):
+                if not text_input.strip(): st.error("데이터를 입력하십시오.")
                 elif not GEMINI_API_KEY: st.error("Gemini API 키가 설정되지 않았습니다.")
                 else:
                     with st.spinner("AI가 단어를 분석 및 추출 중입니다..."):
-                        prompt = f"다음 영어 지문에서 학습하기 좋은 핵심 영단어 최대 10개를 추출하십시오. 반드시 아래 JSON 배열 형식으로만 응답하십시오.\n\n지문: {text_input}\n\n출력 형식:\n[{{\"word\": \"apple\", \"meaning\": \"사과\", \"example\": \"I ate an apple.\"}}]"
+                        prompt = f"""다음 데이터를 분석하여 단어를 추출하십시오. 
+조건 1: 만약 제공된 텍스트가 '단어장(단어와 뜻이 나열된 목록)' 형태라면, 목록에 있는 **모든 단어**를 개수 제한 없이 누락 없이 100% 추출하십시오.
+조건 2: 만약 일반적인 영어 지문(기사, 문단 등)이라면, 전체 내용에서 학습할 가치가 있는 **핵심 영단어 모두**를 개수 제한 없이 추출하십시오.
+반드시 아래 JSON 배열 형식으로만 응답하십시오.
+
+데이터: {text_input}
+
+출력 형식:
+[{{\"word\": \"apple\", \"meaning\": \"사과\", \"example\": \"I ate an apple.\"}}]"""
                         try:
                             client = genai.Client(api_key=GEMINI_API_KEY)
                             response = client.models.generate_content(model='gemini-2.5-flash', contents=prompt)
-                            result_text = response.text.strip()
-                            
-                            # 마크다운 블록 문자를 안전하게 제거하여 JSON 파싱 오류 및 코드 잘림 현상 방지
-                            result_text = result_text.replace("```json", "").replace("```", "").strip()
-                            
+                            result_text = response.text.strip().replace("```json", "").replace("```", "").strip()
                             st.session_state.extracted_df = pd.DataFrame(json.loads(result_text))
                         except Exception as e: st.error(f"오류 발생: {e}")
+                        
+    elif add_mode == "AI 자동 추출 (이미지/PDF 파일 업로드)":
+        with st.form("ai_file_extract_form"):
+            # 여러 파일 동시 업로드 허용
+            uploaded_files = st.file_uploader("단어장 사진(JPG, PNG)이나 영어 지문 PDF를 업로드하십시오. (여러 개 선택 가능)", type=["png", "jpg", "jpeg", "pdf"], accept_multiple_files=True)
+            if st.form_submit_button("🤖 파일에서 단어 추출"):
+                if not uploaded_files:
+                    st.error("파일을 업로드하십시오.")
+                elif not GEMINI_API_KEY:
+                    st.error("Gemini API 키가 설정되지 않았습니다.")
+                else:
+                    with st.spinner("AI가 파일을 분석하여 단어를 추출 중입니다. (파일이 많을수록 시간이 소요됩니다)..."):
+                        try:
+                            client = genai.Client(api_key=GEMINI_API_KEY)
+                            
+                            prompt = """제공된 파일 데이터들을 분석하여 단어를 추출하십시오. 
+조건 1: 만약 제공된 파일들이 '단어장(단어와 뜻이 나열된 목록)' 형태라면, 목록에 있는 **모든 단어**를 개수 제한 없이 누락 없이 100% 추출하십시오.
+조건 2: 만약 일반적인 글(기사, 문단 등)이라면, 전체 내용에서 학습할 가치가 있는 **핵심 영단어 모두**를 개수 제한 없이 선별하여 추출하십시오.
+반드시 아래 JSON 배열 형식으로만 응답하십시오.
 
-        if st.session_state.extracted_df is not None:
-            st.warning("데이터 검수: 잘못 추출된 데이터가 있다면 표를 클릭하여 직접 수정하십시오.")
-            edited_df = st.data_editor(st.session_state.extracted_df, use_container_width=True, num_rows="dynamic")
-            if st.button("검수 완료 및 데이터베이스 저장"):
-                today = datetime.now().strftime("%Y-%m-%d")
-                for index, row in edited_df.iterrows():
-                    c.execute("INSERT INTO vocab (category, word, meaning, example, date, wrong_count, last_tested) VALUES (?, ?, ?, ?, ?, 0, NULL)", 
-                              (category, row['word'], row['meaning'], row['example'], today))
-                conn.commit()
-                st.success(f"{len(edited_df)}개의 단어 저장 완료")
-                st.session_state.extracted_df = None
-                st.rerun()
+출력 형식:
+[{"word": "apple", "meaning": "사과", "example": "I ate an apple."}]"""
+                            
+                            contents = [prompt]
+                            
+                            # 여러 파일의 데이터를 모두 contents 리스트에 추가
+                            for uploaded_file in uploaded_files:
+                                if uploaded_file.name.lower().endswith('.pdf'):
+                                    pdf_reader = PyPDF2.PdfReader(uploaded_file)
+                                    pdf_text = ""
+                                    for page in pdf_reader.pages:
+                                        pdf_text += page.extract_text() + "\n"
+                                    contents.append(f"PDF 텍스트 내용 ({uploaded_file.name}):\n{pdf_text}")
+                                else:
+                                    img = Image.open(uploaded_file)
+                                    contents.append(img)
+                                
+                            response = client.models.generate_content(model='gemini-2.5-flash', contents=contents)
+                            result_text = response.text.strip().replace("```json", "").replace("```", "").strip()
+                            st.session_state.extracted_df = pd.DataFrame(json.loads(result_text))
+                        except Exception as e:
+                            st.error(f"오류 발생: {e}")
+
+    # 데이터 추출 완료 후 공통으로 실행되는 검수 테이블 UI
+    if st.session_state.extracted_df is not None:
+        st.warning("데이터 검수: 잘못 추출된 데이터가 있다면 표를 클릭하여 직접 수정하십시오.")
+        edited_df = st.data_editor(st.session_state.extracted_df, use_container_width=True, num_rows="dynamic")
+        if st.button("검수 완료 및 데이터베이스 저장"):
+            today = datetime.now().strftime("%Y-%m-%d")
+            for index, row in edited_df.iterrows():
+                c.execute("INSERT INTO vocab (category, word, meaning, example, date, wrong_count, last_tested) VALUES (?, ?, ?, ?, ?, 0, NULL)", 
+                          (category, row['word'], row['meaning'], row['example'], today))
+            conn.commit()
+            st.success(f"{len(edited_df)}개의 단어 저장 완료")
+            st.session_state.extracted_df = None
+            st.rerun()
 
 # --- [탭 2: 누적 단어 확인] ---
 with tab2:
