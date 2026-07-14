@@ -126,7 +126,7 @@ def download_latest_from_google_drive():
 if 'quiz_started' not in st.session_state: st.session_state.quiz_started = False
 if 'extracted_df' not in st.session_state: st.session_state.extracted_df = None
 
-st.title("📖 AI 스마트 단어장")
+st.title("📖 Project1_TOEFL")
 tab1, tab2, tab3, tab4, tab5 = st.tabs(["➕ 단어 추가", "📚 누적 단어 확인", "🎯 실전 퀴즈", "📊 학습 통계", "⚙️ 데이터 백업/복구"])
 
 # --- [탭 1: 단어 추가] ---
