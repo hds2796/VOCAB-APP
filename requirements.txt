@@ -3,5 +3,6 @@ streamlit
 google-genai
 pandas
 pillow
+PyPDF2
 google-api-python-client
 google-auth-oauthlib
