@@ -180,7 +180,7 @@ with tab1:
 [{{\"word\": \"apple\", \"meaning\": \"사과\", \"example\": \"I ate an apple.\"}}]"""
                         try:
                             client = genai.Client(api_key=GEMINI_API_KEY)
-                            response = client.models.generate_content(model='gemini-2.5-flash', contents=prompt)
+                            response = client.models.generate_content(model='gemini-3.1-flash-lite', contents=prompt)
                             result_text = response.text.strip().replace("```json", "").replace("```", "").strip()
                             st.session_state.extracted_df = pd.DataFrame(json.loads(result_text))
                         except Exception as e: st.error(f"오류 발생: {e}")
